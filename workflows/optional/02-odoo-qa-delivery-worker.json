@@ -1,0 +1,1618 @@
+{
+  "name": "02 - ERP Delivery Worker",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ],
+      "id": "c6989ce9-7e8a-4e7d-9bd7-e4c1e81d2b94",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.recover_stale_delivery_jobs(\n    120, 100\n) AS recovery_result;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        224,
+        0
+      ],
+      "id": "4cf37b7f-972f-4fd5-a737-321b4fb64e0b",
+      "name": "Recover Stale Jobs"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT *\nFROM public.claim_delivery_jobs(5);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        448,
+        0
+      ],
+      "id": "9e95c9ee-5b56-4a72-8e34-bf2f101ff794",
+      "name": "Claim Delivery Jobs"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "\nSELECT\n    j.id AS job_id,\n    j.lease_token,\n    j.attempts,\n    j.max_attempts,\n    o.id AS order_id,\n    o.shop_domain,\n    o.shopify_order_id,\n    o.order_number,\n    o.external_reference,\n    o.currency,\n    o.total_amount,\n    o.customer_data,\n    o.raw_order,\n    COALESCE(\n        jsonb_agg(\n            jsonb_build_object(\n                'sku', l.sku,\n                'quantity', l.quantity,\n                'unit_price', l.unit_price\n            )\n            ORDER BY l.id\n        ) FILTER (WHERE l.id IS NOT NULL),\n        '[]'::jsonb\n    ) AS order_lines\nFROM public.delivery_jobs AS j\nJOIN public.orders AS o\n    ON o.id = j.order_id\nLEFT JOIN public.order_lines AS l\n    ON l.order_id = o.id\nWHERE j.id = $1::uuid\n  AND j.lease_token = $2::uuid\n  AND j.status = 'processing'\nGROUP BY j.id, o.id;\n",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.job_id,\n  $json.claim_lease_token\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        672,
+        0
+      ],
+      "id": "5cc3e28a-e023-490e-a6f1-c1b17b176a8d",
+      "name": "Load Order for ERP"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst order = $input.item.json;\n\nconst lines = typeof order.order_lines === 'string'\n  ? JSON.parse(order.order_lines)\n  : order.order_lines;\n\nif (!Array.isArray(lines) || lines.length === 0) {\n  throw new Error('Order contains no lines');\n}\n\nif (!order.external_reference) {\n  throw new Error('Missing external order reference');\n}\n\nconst erpPayload = {\n  external_reference: order.external_reference,\n  shop_domain: order.shop_domain,\n  shopify_order_id: order.shopify_order_id,\n  order_number: order.order_number,\n  currency: order.currency,\n  total_amount: order.total_amount,\n  customer: order.customer_data,\n  lines: lines.map(line => ({\n    sku: line.sku,\n    quantity: line.quantity,\n    unit_price: line.unit_price\n  }))\n};\n\nreturn {\n  json: {\n    ...order,\n    erp_payload: erpPayload\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        0
+      ],
+      "id": "b2a4c3cc-747f-439e-8aca-543c1d03d5bf",
+      "name": "Prepare ERP Payload"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://n8n:5678/webhook/mock-erp-orders",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.erp_payload) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1120,
+        0
+      ],
+      "id": "a3698af6-9fc5-4b74-b3ac-ca49f14e69c0",
+      "name": "Send Order to Mock ERP",
+      "retryOnFail": false,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst response = $input.item.json;\nconst order = $('Prepare ERP Payload').item.json;\n\nconst statusCode = Number(response.statusCode ?? 0);\n\nlet body = response.body ?? response;\n\nif (typeof body === 'string') {\n  try {\n    body = JSON.parse(body);\n  } catch {\n    body = {};\n  }\n}\n\nif (!body || typeof body !== 'object') {\n  body = {};\n}\n\nconst result = body.result ?? null;\nconst erpOrderId = body.odoo_order_id ?? null;\n\nlet outcome = 'retryable_failure';\nlet retryable = true;\nlet errorCategory = 'erp_temporary_failure';\nlet errorMessage =\n  response.error?.message ??\n  response.message ??\n  body.error ??\n  `ERP request failed (HTTP ${statusCode})`;\n\nif (\n  statusCode >= 200 &&\n  statusCode < 300 &&\n  ['created', 'duplicate'].includes(result) &&\n  typeof erpOrderId === 'string' &&\n  erpOrderId.trim() !== ''\n) {\n  outcome = 'success';\n  retryable = false;\n  errorCategory = null;\n  errorMessage = null;\n} else if (\n  ['conflict', 'invalid'].includes(result) ||\n  [400, 409, 422].includes(statusCode)\n) {\n  outcome = 'permanent_failure';\n  retryable = false;\n  errorCategory = String(result ?? 'erp_validation');\n  errorMessage = String(body.error ?? 'ERP rejected the order');\n}\n\nreturn {\n  json: {\n    job_id: order.job_id,\n    lease_token: order.lease_token,\n    outcome,\n    retryable,\n    erp_order_id: erpOrderId,\n    error_category: errorCategory,\n    error_message: String(errorMessage ?? ''),\n    http_status: statusCode,\n    erp_result: result\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        0
+      ],
+      "id": "ca224e63-4a86-4cbd-b4ca-9489a1c8a5ec",
+      "name": "Classify ERP Result"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "success",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "e854708a-b813-428b-aef4-029dbc903ce4"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "74993f58-9683-46b6-8af3-30cfe7b91012",
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "permanent_failure",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "9c1cf43b-9125-4e42-8d0c-b5efb9d166ce",
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "retryable_failure",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1568,
+        0
+      ],
+      "id": "d0925564-cc36-4cf4-ba2b-cb9d73d8bbcc",
+      "name": "Route ERP Outcome"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.complete_delivery_job(\n    $1::uuid,\n    $2::uuid,\n    $3::text\n) AS completion_result;",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.job_id,\n  $json.lease_token,\n  $json.erp_order_id\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1920,
+        -16
+      ],
+      "id": "58395f1c-0d53-41d3-a25d-4c63c7c99ad8",
+      "name": "Complete Delivery Job"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.fail_delivery_job(\n    $1::uuid,\n    $2::uuid,\n    $3::text,\n    $4::text,\n    $5::boolean\n) AS failure_result;",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.job_id,\n  $json.lease_token,\n  $json.error_category,\n  $json.error_message,\n  $json.retryable\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1968,
+        144
+      ],
+      "id": "38b3dfdd-e146-43d2-946b-340361a5d6d3",
+      "name": "Record Delivery Failure"
+    },
+    {
+      "id": "445dad3b-5ffc-4a27-8513-a992013f2273",
+      "name": "QA Odoo Route Guard",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2900,
+        600
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "90bc2b5d-3e08-4b0d-9eb7-dcccf62adc3c",
+              "leftValue": "={{ $json.shop_domain === 'YOUR_DEV_STORE.myshopify.com' && $json.raw_order?.note === 'N8N-LIVE-QA-20261012-01' }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "8e201aa8-6220-4933-9f8f-d375a71cb85f",
+      "name": "QA Validate Intake",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c={...$json};const p=c.erp_payload;const l=p.lines;const ok=p.currency==='USD'&&l.length===1&&l[0].sku==='ABC'&&Number.isInteger(Number(l[0].quantity))&&Number(l[0].quantity)>0&&Number.isFinite(Number(l[0].unit_price))&&Number(l[0].unit_price)>=0&&p.customer&&Object.keys(p.customer).length>0;if(!ok)return {json:{qa_failed:true,statusCode:422,body:{result:'invalid',error:'QA fixture mismatch'}}};c.qa_ref=c.external_reference;c.qa_qty=Number(l[0].quantity);c.qa_price=Number(l[0].unit_price);c.qa_subtotal=Math.round(c.qa_qty*c.qa_price*100)/100;c.qa_tax=Math.round(c.qa_subtotal*0.15*100)/100;c.qa_total=Math.round((c.qa_subtotal+c.qa_tax)*100)/100;return {json:c};"
+      }
+    },
+    {
+      "id": "2b1b969d-a281-43e8-b0e7-ef150a5fdf96",
+      "name": "QA Request Reference",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3260,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c={...$json};c.qa_model=\"sale.order\";c.qa_method=\"search_read\";c.qa_args={domain:[['client_order_ref','=',c.qa_ref]],fields:['id'],limit:2};return {json:c};"
+      }
+    },
+    {
+      "id": "51abfb88-c603-468e-9f6c-69137039da10",
+      "name": "QA HTTP Reference",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        3440,
+        600
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://ODOO_TEST_HOST:8069/json/2/' + $json.qa_model + '/' + $json.qa_method }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "gateway"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.qa_args) }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "id": "4723d614-1145-4b56-bee8-ba9cd32f58c8",
+      "name": "QA Check Reference",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3620,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c={...$('QA Request Reference').item.json};const r=$json;const status=Number(r.statusCode||0);let b=r.body;try{if(typeof b==='string')b=JSON.parse(b);}catch{}const fail=(m,permanent=true)=>({json:{qa_failed:true,statusCode:permanent?422:503,body:{result:permanent?'invalid':null,error:m}}});if(status<200||status>=300){const n=String(b?.name||'');return fail('Odoo '+c.qa_method+' failed HTTP '+status,[400,401,403,404,409,422].includes(status)||n.startsWith('odoo.exceptions.')||n.startsWith('builtins.'));}try{if(!Array.isArray(b)||b.length>1)throw Error('Ambiguous/invalid reference response');c.qa_id=b.length?b[0].id:null;c.qa_existing=!!c.qa_id;return {json:c};}catch(e){return fail(String(e.message));}"
+      }
+    },
+    {
+      "id": "7abeb968-9dc1-4eec-be92-10664f8fa319",
+      "name": "QA Check Reference Continue",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3800,
+        600
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "3b1c35b6-4a41-40e1-afa7-ed8c624aac36",
+              "leftValue": "={{ !$json.qa_failed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "be70d8b8-fb81-4fef-9a52-790b5aca5b59",
+      "name": "QA Request Customer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3980,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c={...$json};c.qa_model=\"res.partner\";c.qa_method=\"read\";c.qa_args={ids:[15],fields:['id','active']};return {json:c};"
+      }
+    },
+    {
+      "id": "06fba72b-2149-4c93-a5dd-80a8f2a67acb",
+      "name": "QA HTTP Customer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        4160,
+        600
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://ODOO_TEST_HOST:8069/json/2/' + $json.qa_model + '/' + $json.qa_method }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "gateway"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.qa_args) }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "id": "601d6a63-1d63-4511-9ece-d056daeac2d0",
+      "name": "QA Check Customer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4340,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c={...$('QA Request Customer').item.json};const r=$json;const status=Number(r.statusCode||0);let b=r.body;try{if(typeof b==='string')b=JSON.parse(b);}catch{}const fail=(m,permanent=true)=>({json:{qa_failed:true,statusCode:permanent?422:503,body:{result:permanent?'invalid':null,error:m}}});if(status<200||status>=300){const n=String(b?.name||'');return fail('Odoo '+c.qa_method+' failed HTTP '+status,[400,401,403,404,409,422].includes(status)||n.startsWith('odoo.exceptions.')||n.startsWith('builtins.'));}try{if(!Array.isArray(b)||b.length!==1||b[0].id!==15||!b[0].active)throw Error('Customer fixture unavailable');return {json:c};}catch(e){return fail(String(e.message));}"
+      }
+    },
+    {
+      "id": "8f591a69-2a1f-47d2-9f60-c03c480e844b",
+      "name": "QA Check Customer Continue",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4520,
+        600
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "4ad19b68-9123-41e0-9d36-c9152fa80c4f",
+              "leftValue": "={{ !$json.qa_failed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "34506f89-d7df-40fb-b058-5fbdc417e963",
+      "name": "QA Request Product",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4700,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c={...$json};c.qa_model=\"product.product\";c.qa_method=\"search_read\";c.qa_args={domain:[['default_code','=','GWDEMO1'],['active','=',true]],fields:['id','taxes_id'],limit:2};return {json:c};"
+      }
+    },
+    {
+      "id": "2594fd8b-7884-4ee8-bd30-ae89b8fbd9ea",
+      "name": "QA HTTP Product",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        4880,
+        600
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://ODOO_TEST_HOST:8069/json/2/' + $json.qa_model + '/' + $json.qa_method }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "gateway"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.qa_args) }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "id": "e70a813d-adb7-4027-84ed-4dc5f0e54d4f",
+      "name": "QA Check Product",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5060,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c={...$('QA Request Product').item.json};const r=$json;const status=Number(r.statusCode||0);let b=r.body;try{if(typeof b==='string')b=JSON.parse(b);}catch{}const fail=(m,permanent=true)=>({json:{qa_failed:true,statusCode:permanent?422:503,body:{result:permanent?'invalid':null,error:m}}});if(status<200||status>=300){const n=String(b?.name||'');return fail('Odoo '+c.qa_method+' failed HTTP '+status,[400,401,403,404,409,422].includes(status)||n.startsWith('odoo.exceptions.')||n.startsWith('builtins.'));}try{if(!Array.isArray(b)||b.length!==1||b[0].id!==42||JSON.stringify(b[0].taxes_id)!=='[1]')throw Error('Product/tax fixture mismatch');return {json:c};}catch(e){return fail(String(e.message));}"
+      }
+    },
+    {
+      "id": "a85ee412-4d8e-445b-b985-76a7a2bff907",
+      "name": "QA Check Product Continue",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        5240,
+        600
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "300b4d05-647d-4d40-864e-5da996bf5f54",
+              "leftValue": "={{ !$json.qa_failed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "3086de72-4244-427e-9e46-f0fab3ef8b98",
+      "name": "QA Request Tax",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5420,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c={...$json};c.qa_model=\"account.tax\";c.qa_method=\"read\";c.qa_args={ids:[1],fields:['id','amount','amount_type','price_include_override','company_id']};return {json:c};"
+      }
+    },
+    {
+      "id": "9977392c-dfcf-4d98-a1f5-cf15fd91f168",
+      "name": "QA HTTP Tax",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        5600,
+        600
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://ODOO_TEST_HOST:8069/json/2/' + $json.qa_model + '/' + $json.qa_method }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "gateway"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.qa_args) }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "id": "09e645f5-6c65-4e4f-9eb3-0a8b75c92ff9",
+      "name": "QA Check Tax",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5780,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c={...$('QA Request Tax').item.json};const r=$json;const status=Number(r.statusCode||0);let b=r.body;try{if(typeof b==='string')b=JSON.parse(b);}catch{}const fail=(m,permanent=true)=>({json:{qa_failed:true,statusCode:permanent?422:503,body:{result:permanent?'invalid':null,error:m}}});if(status<200||status>=300){const n=String(b?.name||'');return fail('Odoo '+c.qa_method+' failed HTTP '+status,[400,401,403,404,409,422].includes(status)||n.startsWith('odoo.exceptions.')||n.startsWith('builtins.'));}try{if(!Array.isArray(b)||b.length!==1||b[0].amount!==15||b[0].amount_type!=='percent'||b[0].price_include_override||b[0].company_id?.[0]!==1)throw Error('Tax fixture mismatch');return {json:c};}catch(e){return fail(String(e.message));}"
+      }
+    },
+    {
+      "id": "ecdb608a-7415-4fc6-8937-4b0848594ba5",
+      "name": "QA Check Tax Continue",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        5960,
+        600
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a9ba38ce-7500-40d4-9a60-747b4d7ca068",
+              "leftValue": "={{ !$json.qa_failed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "bc92104a-efc1-4e9b-a4fe-5c48f82da818",
+      "name": "QA Existing Quotation",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        6140,
+        600
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b0265b13-d0a1-4f5f-9763-57216569d8a8",
+              "leftValue": "={{ !!$json.qa_id }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "0202d4b8-bdc2-42cc-8e63-f369410a07e5",
+      "name": "QA Request Create",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6320,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c={...$json};c.qa_model=\"sale.order\";c.qa_method=\"create\";c.qa_args={vals_list:[{partner_id:15,company_id:1,client_order_ref:c.qa_ref,order_line:[[0,0,{product_id:42,product_uom_qty:c.qa_qty,price_unit:c.qa_price,discount:0,tax_ids:[[6,0,[1]]]}]]}],context:{mail_create_nosubscribe:true,mail_create_nolog:true,tracking_disable:true,mail_notify_force_send:false}};return {json:c};"
+      }
+    },
+    {
+      "id": "fb7b902c-2212-4b9c-aed2-a40569455429",
+      "name": "QA HTTP Create",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        6500,
+        600
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://ODOO_TEST_HOST:8069/json/2/' + $json.qa_model + '/' + $json.qa_method }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "gateway"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.qa_args) }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "id": "cdc028b0-0510-47d7-940d-adb54265086b",
+      "name": "QA Check Create",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6680,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c={...$('QA Request Create').item.json};const r=$json;const status=Number(r.statusCode||0);let b=r.body;try{if(typeof b==='string')b=JSON.parse(b);}catch{}const fail=(m,permanent=true)=>({json:{qa_failed:true,statusCode:permanent?422:503,body:{result:permanent?'invalid':null,error:m}}});if(status<200||status>=300){const n=String(b?.name||'');return fail('Odoo '+c.qa_method+' failed HTTP '+status,[400,401,403,404,409,422].includes(status)||n.startsWith('odoo.exceptions.')||n.startsWith('builtins.'));}try{const id=Array.isArray(b)&&b.length===1?b[0]:b;if(!Number.isInteger(id)||id<=0)throw Error('Create response missing ID; reconcile by reference');c.qa_id=id;return {json:c};}catch(e){return fail(String(e.message));}"
+      }
+    },
+    {
+      "id": "00190972-f185-4e5c-a6d0-c34ed5be85cf",
+      "name": "QA Check Create Continue",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        6860,
+        600
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "eb74f8f5-ac8a-4860-a321-889a793b260a",
+              "leftValue": "={{ !$json.qa_failed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "9ac26f9f-340d-43fe-9495-e231d13695f2",
+      "name": "QA Request Readback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7040,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c={...$json};c.qa_model=\"sale.order\";c.qa_method=\"read\";c.qa_args={ids:[c.qa_id],fields:['id','name','state','client_order_ref','partner_id','company_id','currency_id','order_line','amount_untaxed','amount_tax','amount_total']};return {json:c};"
+      }
+    },
+    {
+      "id": "82c73deb-d789-4302-8b9e-554850540049",
+      "name": "QA HTTP Readback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        7220,
+        600
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://ODOO_TEST_HOST:8069/json/2/' + $json.qa_model + '/' + $json.qa_method }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "gateway"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.qa_args) }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "id": "fb8897d1-ba57-4a3f-80d7-feff976a1ab5",
+      "name": "QA Check Readback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7400,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c={...$('QA Request Readback').item.json};const r=$json;const status=Number(r.statusCode||0);let b=r.body;try{if(typeof b==='string')b=JSON.parse(b);}catch{}const fail=(m,permanent=true)=>({json:{qa_failed:true,statusCode:permanent?422:503,body:{result:permanent?'invalid':null,error:m}}});if(status<200||status>=300){const n=String(b?.name||'');return fail('Odoo '+c.qa_method+' failed HTTP '+status,[400,401,403,404,409,422].includes(status)||n.startsWith('odoo.exceptions.')||n.startsWith('builtins.'));}try{if(!Array.isArray(b)||b.length!==1)throw Error('Quotation unavailable');const o=b[0];if(o.state!=='draft'||o.client_order_ref!==c.qa_ref||o.partner_id?.[0]!==15||o.company_id?.[0]!==1||o.currency_id?.[1]!=='USD'||Math.abs(Number(o.amount_untaxed)-c.qa_subtotal)>0.005||Math.abs(Number(o.amount_tax)-c.qa_tax)>0.005||Math.abs(Number(o.amount_total)-c.qa_total)>0.005||o.order_line?.length!==1)throw Error('Quotation mismatch; retained ERP ID '+c.qa_id);c.qa_line_ids=o.order_line;return {json:c};}catch(e){return fail(String(e.message));}"
+      }
+    },
+    {
+      "id": "cefe647b-d107-44b9-a9cf-a4f52c047bc3",
+      "name": "QA Check Readback Continue",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        7580,
+        600
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "228199b5-73df-4372-b939-4ac8a0eb2495",
+              "leftValue": "={{ !$json.qa_failed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "d59c38be-df38-4128-bc82-5ef8df65ca2e",
+      "name": "QA Request Lines",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7760,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c={...$json};c.qa_model=\"sale.order.line\";c.qa_method=\"read\";c.qa_args={ids:c.qa_line_ids,fields:['product_id','product_uom_qty','price_unit','discount','tax_ids','price_subtotal','price_tax','price_total']};return {json:c};"
+      }
+    },
+    {
+      "id": "807fbd15-d19b-47f9-bd76-753cb713cc19",
+      "name": "QA HTTP Lines",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        7940,
+        600
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://ODOO_TEST_HOST:8069/json/2/' + $json.qa_model + '/' + $json.qa_method }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "gateway"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.qa_args) }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "id": "1baa771d-ff38-4fb0-a768-560fd9b7495c",
+      "name": "QA Check Lines",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8120,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const c={...$('QA Request Lines').item.json};const r=$json;const status=Number(r.statusCode||0);let b=r.body;try{if(typeof b==='string')b=JSON.parse(b);}catch{}const fail=(m,permanent=true)=>({json:{qa_failed:true,statusCode:permanent?422:503,body:{result:permanent?'invalid':null,error:m}}});if(status<200||status>=300){const n=String(b?.name||'');return fail('Odoo '+c.qa_method+' failed HTTP '+status,[400,401,403,404,409,422].includes(status)||n.startsWith('odoo.exceptions.')||n.startsWith('builtins.'));}try{if(!Array.isArray(b)||b.length!==1)throw Error('Line count mismatch');const l=b[0];if(l.product_id?.[0]!==42||Number(l.product_uom_qty)!==c.qa_qty||Number(l.price_unit)!==c.qa_price||Number(l.discount)!==0||JSON.stringify(l.tax_ids)!=='[1]'||Math.abs(Number(l.price_subtotal)-c.qa_subtotal)>0.005||Math.abs(Number(l.price_tax)-c.qa_tax)>0.005||Math.abs(Number(l.price_total)-c.qa_total)>0.005)throw Error('Line mismatch; retained ERP ID '+c.qa_id);return {json:c};}catch(e){return fail(String(e.message));}"
+      }
+    },
+    {
+      "id": "01069aed-5430-49f4-81fd-d51cb55fde9d",
+      "name": "QA Check Lines Continue",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        8300,
+        600
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1777ea37-fd51-4a33-b750-46c1d6acdc0a",
+              "leftValue": "={{ !$json.qa_failed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "aaf9e77d-e1f0-408d-b2f3-95b82c9846c8",
+      "name": "QA Normalize Success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8480,
+        600
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "return {json:{statusCode:200,body:{result:$json.qa_existing?'duplicate':'created',odoo_order_id:String($json.qa_id)}}};"
+      }
+    },
+    {
+      "id": "b3559758-c1d7-4daf-af4b-0f74ff84d362",
+      "name": "QA Validate Intake Continue",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        8660,
+        600
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "15b27866-80e4-4ea7-b265-9fcb41fb6808",
+              "leftValue": "={{ !$json.qa_failed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Recover Stale Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recover Stale Jobs": {
+      "main": [
+        [
+          {
+            "node": "Claim Delivery Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Delivery Jobs": {
+      "main": [
+        [
+          {
+            "node": "Load Order for ERP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Order for ERP": {
+      "main": [
+        [
+          {
+            "node": "Prepare ERP Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare ERP Payload": {
+      "main": [
+        [
+          {
+            "node": "QA Odoo Route Guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Order to Mock ERP": {
+      "main": [
+        [
+          {
+            "node": "Classify ERP Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify ERP Result": {
+      "main": [
+        [
+          {
+            "node": "Route ERP Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route ERP Outcome": {
+      "main": [
+        [
+          {
+            "node": "Complete Delivery Job",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record Delivery Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record Delivery Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Odoo Route Guard": {
+      "main": [
+        [
+          {
+            "node": "QA Validate Intake",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Order to Mock ERP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Request Reference": {
+      "main": [
+        [
+          {
+            "node": "QA HTTP Reference",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA HTTP Reference": {
+      "main": [
+        [
+          {
+            "node": "QA Check Reference",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Check Reference": {
+      "main": [
+        [
+          {
+            "node": "QA Check Reference Continue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Check Reference Continue": {
+      "main": [
+        [
+          {
+            "node": "QA Request Customer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify ERP Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Request Customer": {
+      "main": [
+        [
+          {
+            "node": "QA HTTP Customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA HTTP Customer": {
+      "main": [
+        [
+          {
+            "node": "QA Check Customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Check Customer": {
+      "main": [
+        [
+          {
+            "node": "QA Check Customer Continue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Check Customer Continue": {
+      "main": [
+        [
+          {
+            "node": "QA Request Product",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify ERP Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Request Product": {
+      "main": [
+        [
+          {
+            "node": "QA HTTP Product",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA HTTP Product": {
+      "main": [
+        [
+          {
+            "node": "QA Check Product",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Check Product": {
+      "main": [
+        [
+          {
+            "node": "QA Check Product Continue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Check Product Continue": {
+      "main": [
+        [
+          {
+            "node": "QA Request Tax",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify ERP Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Request Tax": {
+      "main": [
+        [
+          {
+            "node": "QA HTTP Tax",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA HTTP Tax": {
+      "main": [
+        [
+          {
+            "node": "QA Check Tax",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Check Tax": {
+      "main": [
+        [
+          {
+            "node": "QA Check Tax Continue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Check Tax Continue": {
+      "main": [
+        [
+          {
+            "node": "QA Existing Quotation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify ERP Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Existing Quotation": {
+      "main": [
+        [
+          {
+            "node": "QA Request Readback",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "QA Request Create",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Request Create": {
+      "main": [
+        [
+          {
+            "node": "QA HTTP Create",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA HTTP Create": {
+      "main": [
+        [
+          {
+            "node": "QA Check Create",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Check Create": {
+      "main": [
+        [
+          {
+            "node": "QA Check Create Continue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Check Create Continue": {
+      "main": [
+        [
+          {
+            "node": "QA Request Readback",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify ERP Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Request Readback": {
+      "main": [
+        [
+          {
+            "node": "QA HTTP Readback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA HTTP Readback": {
+      "main": [
+        [
+          {
+            "node": "QA Check Readback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Check Readback": {
+      "main": [
+        [
+          {
+            "node": "QA Check Readback Continue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Check Readback Continue": {
+      "main": [
+        [
+          {
+            "node": "QA Request Lines",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify ERP Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Request Lines": {
+      "main": [
+        [
+          {
+            "node": "QA HTTP Lines",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA HTTP Lines": {
+      "main": [
+        [
+          {
+            "node": "QA Check Lines",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Check Lines": {
+      "main": [
+        [
+          {
+            "node": "QA Check Lines Continue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Check Lines Continue": {
+      "main": [
+        [
+          {
+            "node": "QA Normalize Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify ERP Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Normalize Success": {
+      "main": [
+        [
+          {
+            "node": "Classify ERP Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Validate Intake": {
+      "main": [
+        [
+          {
+            "node": "QA Validate Intake Continue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Validate Intake Continue": {
+      "main": [
+        [
+          {
+            "node": "QA Request Reference",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify ERP Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "active": false,
+  "pinData": {}
+}

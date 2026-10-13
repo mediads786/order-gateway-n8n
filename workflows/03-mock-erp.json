@@ -1,0 +1,181 @@
+{
+  "name": "03 - Mock ERP",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mock-erp-orders",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "4e0486f6-9800-402d-b555-a21d0f8f27f3",
+      "name": "Webhook"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);\n\nfunction check(order) {\n  if (!isObject(order)) return 'body_not_object';\n  const ref = order.external_reference;\n  if (typeof ref !== 'string' || ref.trim().length === 0 || ref.length > 200) return 'bad_reference';\n  if (typeof order.shopify_order_id !== 'string') return 'bad_shopify_order_id';\n  if (!Array.isArray(order.lines) || order.lines.length === 0 || order.lines.length > 200) return 'bad_lines';\n  for (const line of order.lines) {\n    if (!isObject(line)) return 'bad_line';\n    if (typeof line.sku !== 'string' || line.sku.trim().length === 0 || line.sku.length > 64) return 'bad_sku';\n    const q = Number(line.quantity);\n    if (line.quantity === null || line.quantity === '' || !Number.isInteger(q) || q < 1 || q > 1000000) return 'bad_quantity';\n  }\n  return null;\n}\n\nlet order = {};\nlet error;\ntry {\n  order = $input.item.json.body ?? {};\n  error = check(order);\n} catch (e) {\n  error = 'validation_exception';\n}\n\nreturn {\n  json: {\n    valid: error === null,\n    external_reference: (isObject(order) && typeof order.external_reference === 'string') ? order.external_reference : null,\n    received_order: order,\n    error: error === null ? null : 'invalid_erp_payload',\n    detail: error\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "c6447d3a-c9ed-44aa-a461-74dcb4d63824",
+      "name": "Validate Mock ERP Request"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "fbe2f900-1def-41f7-830b-2faf64c5a292",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        448,
+        0
+      ],
+      "id": "6aed39b7-74f2-4d6f-ab28-ff9da955b115",
+      "name": "Valid ERP Order?"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.accept_mock_erp_order(\n    $1::jsonb\n) AS erp_result;",
+        "options": {
+          "queryReplacement": "={{ [\n  JSON.stringify($json.received_order)\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        688,
+        -16
+      ],
+      "id": "e39b5d35-b7cb-4a86-aa04-a4216b93ee7a",
+      "name": "Persist Mock ERP Order"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.erp_result) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        896,
+        -16
+      ],
+      "id": "b5580a18-c58b-4e44-8232-b325333dd254",
+      "name": "Respond - Mock ERP Result"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"result\":\"invalid\",\"error\":\"invalid_erp_payload\"}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        464,
+        240
+      ],
+      "id": "886e9fdb-1f66-4715-a5d9-d40588d3fcd5",
+      "name": "Respond - Invalid ERP Order"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Mock ERP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Mock ERP Request": {
+      "main": [
+        [
+          {
+            "node": "Valid ERP Order?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid ERP Order?": {
+      "main": [
+        [
+          {
+            "node": "Persist Mock ERP Order",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond - Invalid ERP Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Mock ERP Order": {
+      "main": [
+        [
+          {
+            "node": "Respond - Mock ERP Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "active": false,
+  "pinData": {}
+}

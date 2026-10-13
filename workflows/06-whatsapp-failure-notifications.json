@@ -1,0 +1,169 @@
+{
+  "name": "06 - WhatsApp Failure Notifications",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ],
+      "id": "7e129f4a-3b11-4f9d-86b5-6c0a15dee951",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.recover_stale_whatsapp_notifications(\n    120, 100\n) AS recovery_result;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        224,
+        0
+      ],
+      "id": "69a97970-42c4-4388-8778-632ca35eafd8",
+      "name": "Recover Stale WhatsApp Notifications"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT *\nFROM public.claim_whatsapp_notifications(1);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        416,
+        0
+      ],
+      "id": "5ea665a8-8547-4c82-b035-8e47b0e4afe9",
+      "name": "Claim WhatsApp Notifications"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v25.0/REPLACE_WITH_PHONE_NUMBER_ID/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpTemplatedCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "\n{{ JSON.stringify({\n  messaging_product: 'whatsapp',\n  to: '923134712077',\n  type: 'template',\n  template: {\n    name: 'order_gateway_failure_alert',\n    language: {\n      code: 'en'\n    },\n    components: [{\n      type: 'body',\n      parameters: [\n        {\n          type: 'text',\n          text: String(\n            $json.event_details?.shopify_order_id ??\n            $json.order_id ??\n            'Unknown'\n          )\n        },\n        {\n          type: 'text',\n          text: String(\n            $json.event_details?.error_message ??\n            $json.event_details?.error_category ??\n            'ERP delivery failed'\n          )\n        },\n        {\n          type: 'text',\n          text: String($json.job_id ?? 'Unknown')\n        }\n      ]\n    }]\n  }\n}) }}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        608,
+        0
+      ],
+      "id": "84f8b310-1cdc-4b5b-a704-a8ec66b54f54",
+      "name": "Send WhatsApp Alert",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.complete_whatsapp_notification(\n    $1::uuid,\n    $2::uuid,\n    $3::text\n) AS completion_result;",
+        "options": {
+          "queryReplacement": "={{ [\n  $('Claim WhatsApp Notifications').item.json.notification_id,\n  $('Claim WhatsApp Notifications').item.json.claim_lease_token,\n  $json.messages[0].id\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        832,
+        -96
+      ],
+      "id": "faa2e795-6821-4054-8e6d-62c31c6e3850",
+      "name": "Complete WhatsApp Notification"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.fail_whatsapp_notification(\n    $1::uuid,\n    $2::uuid,\n    $3::text,\n    $4::boolean\n) AS failure_result;",
+        "options": {
+          "queryReplacement": "={{ [\n  $('Claim WhatsApp Notifications').item.json.notification_id,\n  $('Claim WhatsApp Notifications').item.json.claim_lease_token,\n  String($json.error?.message ?? $json.message ?? 'WhatsApp API request failed'),\n  true\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        832,
+        96
+      ],
+      "id": "b1a41b6b-3d0f-4101-81b4-91df6b54b1c7",
+      "name": "Fail WhatsApp Notification"
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Recover Stale WhatsApp Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recover Stale WhatsApp Notifications": {
+      "main": [
+        [
+          {
+            "node": "Claim WhatsApp Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim WhatsApp Notifications": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send WhatsApp Alert": {
+      "main": [
+        [
+          {
+            "node": "Complete WhatsApp Notification",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail WhatsApp Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "active": false,
+  "pinData": {}
+}

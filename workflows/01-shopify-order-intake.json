@@ -1,0 +1,359 @@
+{
+  "name": "01 - Shopify Order Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "shopify-orders",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        -160,
+        0
+      ],
+      "id": "8a3575f0-90e0-45e7-945c-977c4eeb0b67",
+      "name": "Webhook"
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "binaryData": true,
+        "dataPropertyName": "computed_hmac",
+        "encoding": "base64"
+      },
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "7620b07b-867b-49a2-b93b-25d6041541b7",
+      "name": "Crypto"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "4b43aafb-4d30-4f51-9d13-f8d8b801e50f",
+              "leftValue": "={{ $json.hmac_valid }}",
+              "rightValue": "={{ $json.headers[\"x-shopify-hmac-sha256\"] }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        608,
+        0
+      ],
+      "id": "20f4438f-aecd-4da8-9fe3-e44fc9d01588",
+      "name": "Verify Shopify HMAC"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"error\":\"invalid_shopify_signature\"}",
+        "options": {
+          "responseCode": 401
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        624,
+        256
+      ],
+      "id": "e8bdd14c-3799-4820-9d45-471886c6306f",
+      "name": "Invalid"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nreturn $input.all().map(item => {\n  const headers = item.json.headers || {};\n  const computed = item.json.computed_hmac;\n  const received = headers['x-shopify-hmac-sha256'];\n\n  let valid = false;\n\n  if (typeof computed === 'string' && typeof received === 'string') {\n    const a = Buffer.from(computed, 'base64');\n    const b = Buffer.from(received, 'base64');\n\n    if (a.length === 32 && b.length === 32) {\n      valid = crypto.timingSafeEqual(a, b);\n    }\n  }\n\n  return {\n    json: {\n      ...item.json,\n      hmac_valid: valid,\n      shop_domain: headers['x-shopify-shop-domain'],\n      webhook_id: headers['x-shopify-webhook-id'],\n      topic: headers['x-shopify-topic']\n    },\n    binary: item.binary\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        0
+      ],
+      "id": "ac8d1efa-d28f-4d6d-815f-5b30850e02a0",
+      "name": "Timing-Safe HMAC Check"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.accept_shopify_order(\n    $1::text,\n    $2::text,\n    $3::text,\n    $4::text,\n    $5::jsonb\n) AS intake_result;",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.shop_domain,\n  $json.webhook_id,\n  $json.topic,\n  $json.payload_hash,\n  JSON.stringify($json.body)\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1264,
+        -16
+      ],
+      "id": "90d18199-91a8-4f8f-831c-5035a93c3e2c",
+      "name": "Accept Shopify Order"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.intake_result }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1456,
+        -16
+      ],
+      "id": "0fa86868-7492-4c6b-9762-61d82f3a90a9",
+      "name": "Respond - Order Intake Result"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "aaee3b29-6e3d-4e67-ab62-13d28a190a06",
+              "leftValue": "={{ $json.order_valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1056,
+        0
+      ],
+      "id": "5a3b97c8-1d00-476a-8df5-5d4637b836b0",
+      "name": "Validate Shopify Order"
+    },
+    {
+      "parameters": {
+        "jsCode": "const MAX_LINES = 200;\n\nconst isId = v =>\n  (typeof v === 'number' && Number.isInteger(v) && v > 0) ||\n  (typeof v === 'string' && v.trim().length > 0 && v.length <= 64);\n\nconst isMoney = v =>\n  (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 1e9) ||\n  (typeof v === 'string' && /^\\d{1,9}(\\.\\d{1,4})?$/.test(v.trim()));\n\nconst isQty = v =>\n  (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 1000000) ||\n  (typeof v === 'string' && /^\\d{1,7}$/.test(v.trim()) && Number(v) >= 1 && Number(v) <= 1000000);\n\nconst isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);\n\n// returns null when valid, otherwise a short reason\nfunction check(d) {\n  const order = d.body;\n  if (d.topic !== 'orders/create') return 'unsupported_topic';\n  if (typeof d.shop_domain !== 'string' || !d.shop_domain.endsWith('.myshopify.com')) return 'bad_shop_domain';\n  if (typeof d.webhook_id !== 'string' || d.webhook_id.trim().length === 0) return 'missing_webhook_id';\n  if (!isObject(order)) return 'body_not_object';\n  if (!isId(order.id)) return 'bad_order_id';\n  if (typeof order.currency !== 'string' || !/^[A-Z]{3}$/.test(order.currency)) return 'bad_currency';\n  if (!isMoney(order.total_price)) return 'bad_total';\n  if (!Array.isArray(order.line_items) || order.line_items.length === 0) return 'no_lines';\n  if (order.line_items.length > MAX_LINES) return 'too_many_lines';\n\n  const seen = new Set();\n  for (const line of order.line_items) {\n    if (!isObject(line)) return 'bad_line';\n    if (!isId(line.id)) return 'bad_line_id';\n    const key = String(line.id);\n    if (seen.has(key)) return 'duplicate_line_id';\n    seen.add(key);\n    if (typeof line.sku !== 'string' || line.sku.trim().length === 0 || line.sku.length > 64) return 'bad_sku';\n    if (!isQty(line.quantity)) return 'bad_quantity';\n    if (!isMoney(line.price)) return 'bad_price';\n  }\n  return null;\n}\n\nreturn $input.all().map(item => {\n  let error;\n  try {\n    error = check(item.json);\n  } catch (e) {\n    error = 'validation_exception';\n  }\n  return {\n    json: { ...item.json, order_valid: error === null, validation_error: error },\n    binary: item.binary\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        832,
+        0
+      ],
+      "id": "2b30c885-cfab-4fcd-a2ed-751ca695b57e",
+      "name": "Check Order Fields"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"error\":\"invalid_order_payload\"}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1264,
+        240
+      ],
+      "id": "d8d98146-f386-4d3f-90e0-35bb88d1fb45",
+      "name": "Respond - Invalid Order"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.record_rejected_webhook(\n    $1::text,\n    $2::text,\n    $3::text,\n    $4::text,\n    $5::text\n) AS rejection_result;",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.shop_domain,\n  $json.webhook_id,\n  $json.topic,\n  $json.payload_hash,\n  'invalid_order_payload'\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1056,
+        240
+      ],
+      "id": "98f35620-3722-4caf-8e11-43f82d678c86",
+      "name": "Record Rejected Webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst output = [];\n\nfor (let i = 0; i < $input.all().length; i++) {\n  const item = $input.all()[i];\n  const raw = await this.helpers.getBinaryDataBuffer(i, 'data');\n\n  output.push({\n    json: {\n      ...item.json,\n      payload_hash: crypto.createHash('sha256')\n        .update(raw)\n        .digest('hex')\n    },\n    binary: item.binary\n  });\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        48,
+        0
+      ],
+      "id": "e95f9a05-c386-4dbf-8488-f306616c12c6",
+      "name": "Read Raw Body and Hash"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Read Raw Body and Hash",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crypto": {
+      "main": [
+        [
+          {
+            "node": "Timing-Safe HMAC Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Shopify HMAC": {
+      "main": [
+        [
+          {
+            "node": "Check Order Fields",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Invalid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Timing-Safe HMAC Check": {
+      "main": [
+        [
+          {
+            "node": "Verify Shopify HMAC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Accept Shopify Order": {
+      "main": [
+        [
+          {
+            "node": "Respond - Order Intake Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond - Order Intake Result": {
+      "main": [
+        []
+      ]
+    },
+    "Validate Shopify Order": {
+      "main": [
+        [
+          {
+            "node": "Accept Shopify Order",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record Rejected Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Order Fields": {
+      "main": [
+        [
+          {
+            "node": "Validate Shopify Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Rejected Webhook": {
+      "main": [
+        [
+          {
+            "node": "Respond - Invalid Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Raw Body and Hash": {
+      "main": [
+        [
+          {
+            "node": "Crypto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "active": false,
+  "pinData": {}
+}

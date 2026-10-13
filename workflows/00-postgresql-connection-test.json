@@ -1,0 +1,50 @@
+{
+  "name": "00 - PostgreSQL Connection Test",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "558c2317-4ac2-4f52-812a-10b02b926346",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n    current_database() AS database_name,\n    current_user AS connected_user,\n    has_schema_privilege(\n        current_user, 'public', 'USAGE'\n    ) AS schema_access,\n    has_schema_privilege(\n        current_user, 'public', 'CREATE'\n    ) AS can_create_tables;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        224,
+        0
+      ],
+      "id": "fff23f07-b8a2-4e36-931f-fdbf2216ae32",
+      "name": "SQL query"
+    }
+  ],
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "active": false,
+  "pinData": {}
+}

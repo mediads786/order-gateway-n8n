@@ -1,0 +1,79 @@
+{
+  "export_date": "2026-10-12",
+  "source": "Published definitions for active modules; saved definitions for inactive modules; read-only snapshot. Optional Odoo export from Run M retained draft.",
+  "sanitization": "Credentials and local identifiers removed; exports inactive; notification recipients and WhatsApp identifiers replaced; error-workflow references require rebinding; mock URL uses Compose service DNS.",
+  "workflows": [
+    {
+      "file": "00-postgresql-connection-test.json",
+      "module": "00",
+      "name": "00 - PostgreSQL Connection Test",
+      "nodes": 2,
+      "source_active": false,
+      "sha256": "dcc4a888a6436229b6bca115ce0ece1b0a3cfdf4ac282212ec78858750e2e6db"
+    },
+    {
+      "file": "01-shopify-order-intake.json",
+      "module": "01",
+      "name": "01 - Shopify Order Intake",
+      "nodes": 12,
+      "source_active": true,
+      "sha256": "8315d3f89d23b157476fdd2a06c4b7deb057ab4a33ecc2e8a6a5ce951bbb1ca6"
+    },
+    {
+      "file": "02-erp-delivery-worker.json",
+      "module": "02",
+      "name": "02 - ERP Delivery Worker",
+      "nodes": 10,
+      "source_active": true,
+      "sha256": "45f982cb0c58147a98d6f8b937dd8473cb5150268337894afeaf37e7559884b6"
+    },
+    {
+      "file": "03-mock-erp.json",
+      "module": "03",
+      "name": "03 - Mock ERP",
+      "nodes": 6,
+      "source_active": true,
+      "sha256": "cdcb719ac361dae053a9f4cf35dd4eb3b20cb2546052a1aeae826b090e39269f"
+    },
+    {
+      "file": "04-delivery-failure-notifications.json",
+      "module": "04",
+      "name": "04 - Delivery Failure Notifications",
+      "nodes": 6,
+      "source_active": true,
+      "sha256": "740b212103942b3ce47d48c4cce46a0dcc9e00d12311f2e93aa6e596c3eaedf0"
+    },
+    {
+      "file": "05-whatsapp-api-test.json",
+      "module": "05",
+      "name": "05 - WhatsApp API Test",
+      "nodes": 2,
+      "source_active": false,
+      "sha256": "38d3419ec4f469f6393dc45a47d00a1592de6a829141d8ecc6ca4c3f7fbf061c"
+    },
+    {
+      "file": "06-whatsapp-failure-notifications.json",
+      "module": "06",
+      "name": "06 - WhatsApp Failure Notifications",
+      "nodes": 6,
+      "source_active": false,
+      "sha256": "eb838e0e2789a7efc93d8ee0064942b2483863138c5a27b16363187b75ba295a"
+    },
+    {
+      "file": "07-workflow-error-alert.json",
+      "module": "07",
+      "name": "07 - Workflow Error Alert",
+      "nodes": 2,
+      "source_active": true,
+      "sha256": "06225f74939b25e4cc62b6f706eb8b38c8cf78b20d3f2c8e5d3137f7e633d48c"
+    }
+  ],
+  "optional_workflows": [
+    {
+      "file": "optional/02-odoo-qa-delivery-worker.json",
+      "module": "02 QA variant",
+      "nodes": 43,
+      "sha256": "b151b1d7ba0614f61389fd4d49842cf1007fcd330a71a7f2603f25ed0a1d2d8b"
+    }
+  ]
+}

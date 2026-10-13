@@ -1,0 +1,358 @@
+{
+  "name": "02 - ERP Delivery Worker",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ],
+      "id": "c6989ce9-7e8a-4e7d-9bd7-e4c1e81d2b94",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.recover_stale_delivery_jobs(\n    120, 100\n) AS recovery_result;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        224,
+        0
+      ],
+      "id": "4cf37b7f-972f-4fd5-a737-321b4fb64e0b",
+      "name": "Recover Stale Jobs"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT *\nFROM public.claim_delivery_jobs(5);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        448,
+        0
+      ],
+      "id": "9e95c9ee-5b56-4a72-8e34-bf2f101ff794",
+      "name": "Claim Delivery Jobs"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "\nSELECT\n    j.id AS job_id,\n    j.lease_token,\n    j.attempts,\n    j.max_attempts,\n    o.id AS order_id,\n    o.shop_domain,\n    o.shopify_order_id,\n    o.order_number,\n    o.external_reference,\n    o.currency,\n    o.total_amount,\n    o.customer_data,\n    o.raw_order,\n    COALESCE(\n        jsonb_agg(\n            jsonb_build_object(\n                'sku', l.sku,\n                'quantity', l.quantity,\n                'unit_price', l.unit_price\n            )\n            ORDER BY l.id\n        ) FILTER (WHERE l.id IS NOT NULL),\n        '[]'::jsonb\n    ) AS order_lines\nFROM public.delivery_jobs AS j\nJOIN public.orders AS o\n    ON o.id = j.order_id\nLEFT JOIN public.order_lines AS l\n    ON l.order_id = o.id\nWHERE j.id = $1::uuid\n  AND j.lease_token = $2::uuid\n  AND j.status = 'processing'\nGROUP BY j.id, o.id;\n",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.job_id,\n  $json.claim_lease_token\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        672,
+        0
+      ],
+      "id": "5cc3e28a-e023-490e-a6f1-c1b17b176a8d",
+      "name": "Load Order for ERP"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst order = $input.item.json;\n\nconst lines = typeof order.order_lines === 'string'\n  ? JSON.parse(order.order_lines)\n  : order.order_lines;\n\nif (!Array.isArray(lines) || lines.length === 0) {\n  throw new Error('Order contains no lines');\n}\n\nif (!order.external_reference) {\n  throw new Error('Missing external order reference');\n}\n\nconst erpPayload = {\n  external_reference: order.external_reference,\n  shop_domain: order.shop_domain,\n  shopify_order_id: order.shopify_order_id,\n  order_number: order.order_number,\n  currency: order.currency,\n  total_amount: order.total_amount,\n  customer: order.customer_data,\n  lines: lines.map(line => ({\n    sku: line.sku,\n    quantity: line.quantity,\n    unit_price: line.unit_price\n  }))\n};\n\nreturn {\n  json: {\n    ...order,\n    erp_payload: erpPayload\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        0
+      ],
+      "id": "b2a4c3cc-747f-439e-8aca-543c1d03d5bf",
+      "name": "Prepare ERP Payload"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://n8n:5678/webhook/mock-erp-orders",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.erp_payload) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1120,
+        0
+      ],
+      "id": "a3698af6-9fc5-4b74-b3ac-ca49f14e69c0",
+      "name": "Send Order to Mock ERP",
+      "retryOnFail": false,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst response = $input.item.json;\nconst order = $('Prepare ERP Payload').item.json;\n\nconst statusCode = Number(response.statusCode ?? 0);\n\nlet body = response.body ?? response;\n\nif (typeof body === 'string') {\n  try {\n    body = JSON.parse(body);\n  } catch {\n    body = {};\n  }\n}\n\nif (!body || typeof body !== 'object') {\n  body = {};\n}\n\nconst result = body.result ?? null;\nconst erpOrderId = body.odoo_order_id ?? null;\n\nlet outcome = 'retryable_failure';\nlet retryable = true;\nlet errorCategory = 'erp_temporary_failure';\nlet errorMessage =\n  response.error?.message ??\n  response.message ??\n  body.error ??\n  `ERP request failed (HTTP ${statusCode})`;\n\nif (\n  statusCode >= 200 &&\n  statusCode < 300 &&\n  ['created', 'duplicate'].includes(result) &&\n  typeof erpOrderId === 'string' &&\n  erpOrderId.trim() !== ''\n) {\n  outcome = 'success';\n  retryable = false;\n  errorCategory = null;\n  errorMessage = null;\n} else if (\n  ['conflict', 'invalid'].includes(result) ||\n  [400, 409, 422].includes(statusCode)\n) {\n  outcome = 'permanent_failure';\n  retryable = false;\n  errorCategory = String(result ?? 'erp_validation');\n  errorMessage = String(body.error ?? 'ERP rejected the order');\n}\n\nreturn {\n  json: {\n    job_id: order.job_id,\n    lease_token: order.lease_token,\n    outcome,\n    retryable,\n    erp_order_id: erpOrderId,\n    error_category: errorCategory,\n    error_message: String(errorMessage ?? ''),\n    http_status: statusCode,\n    erp_result: result\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        0
+      ],
+      "id": "ca224e63-4a86-4cbd-b4ca-9489a1c8a5ec",
+      "name": "Classify ERP Result"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "success",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "e854708a-b813-428b-aef4-029dbc903ce4"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "74993f58-9683-46b6-8af3-30cfe7b91012",
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "permanent_failure",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "9c1cf43b-9125-4e42-8d0c-b5efb9d166ce",
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "retryable_failure",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1568,
+        0
+      ],
+      "id": "d0925564-cc36-4cf4-ba2b-cb9d73d8bbcc",
+      "name": "Route ERP Outcome"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.complete_delivery_job(\n    $1::uuid,\n    $2::uuid,\n    $3::text\n) AS completion_result;",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.job_id,\n  $json.lease_token,\n  $json.erp_order_id\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1920,
+        -16
+      ],
+      "id": "58395f1c-0d53-41d3-a25d-4c63c7c99ad8",
+      "name": "Complete Delivery Job"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.fail_delivery_job(\n    $1::uuid,\n    $2::uuid,\n    $3::text,\n    $4::text,\n    $5::boolean\n) AS failure_result;",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.job_id,\n  $json.lease_token,\n  $json.error_category,\n  $json.error_message,\n  $json.retryable\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1968,
+        144
+      ],
+      "id": "38b3dfdd-e146-43d2-946b-340361a5d6d3",
+      "name": "Record Delivery Failure"
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Recover Stale Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recover Stale Jobs": {
+      "main": [
+        [
+          {
+            "node": "Claim Delivery Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Delivery Jobs": {
+      "main": [
+        [
+          {
+            "node": "Load Order for ERP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Order for ERP": {
+      "main": [
+        [
+          {
+            "node": "Prepare ERP Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare ERP Payload": {
+      "main": [
+        [
+          {
+            "node": "Send Order to Mock ERP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Order to Mock ERP": {
+      "main": [
+        [
+          {
+            "node": "Classify ERP Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify ERP Result": {
+      "main": [
+        [
+          {
+            "node": "Route ERP Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route ERP Outcome": {
+      "main": [
+        [
+          {
+            "node": "Complete Delivery Job",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record Delivery Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record Delivery Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "active": false,
+  "pinData": {}
+}

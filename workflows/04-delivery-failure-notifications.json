@@ -1,0 +1,165 @@
+{
+  "name": "04 - Delivery Failure Notifications",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ],
+      "id": "2d1064b4-8436-46f8-baf7-dc802091ca5d",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.recover_stale_notifications(\n    120, 100\n) AS recovery_result;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        224,
+        0
+      ],
+      "id": "73af3ffb-0bf6-4f39-a16b-5e1be224d41a",
+      "name": "Recover Stale Notifications"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT *\nFROM public.claim_notifications(1);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        448,
+        0
+      ],
+      "id": "4fd8171b-5e98-4a07-b79a-7e8ea4df439e",
+      "name": "Claim Notifications"
+    },
+    {
+      "parameters": {
+        "sendTo": "qa-recipient@example.invalid",
+        "subject": "={{ 'Order Gateway ALERT - ' + $json.event_type }}",
+        "message": "={{ [   'ORDER GATEWAY - DELIVERY FAILURE',   '',   'Event: ' + $json.event_type,   'Order ID: ' + ($json.order_id ?? 'N/A'),   'Job ID: ' + ($json.job_id ?? 'N/A'),   'Audit Event ID: ' + $json.audit_event_id,   'Notification ID: ' + $json.notification_id,   'Attempt: ' + $json.claim_attempt,   '',   'Failure details:',   JSON.stringify($json.event_details ?? {}, null, 2),   '',   'Action required: Review the dead-lettered delivery job before manually requeuing it.' ].join('\\n') }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        672,
+        0
+      ],
+      "id": "bc0886f4-318b-4207-a796-ba281d063d0c",
+      "name": "Send Failure Alert",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT *\nFROM public.complete_notification(\n    $1::uuid,\n    $2::uuid\n);",
+        "options": {
+          "queryReplacement": "={{ [\n  $('Claim Notifications').first().json.notification_id,\n  $('Claim Notifications').first().json.claim_lease_token\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        784,
+        -320
+      ],
+      "id": "18a75660-04d4-41de-92d6-cf949314bd1e",
+      "name": "Complete Notification"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT *\nFROM public.fail_notification(\n    $1::uuid,\n    $2::uuid,\n    $3::text,\n    $4::boolean\n);",
+        "options": {
+          "queryReplacement": "=={{ [\n  $('Claim Notifications').first().json.notification_id,\n  $('Claim Notifications').first().json.claim_lease_token,\n  String($json.error?.message ?? $json.error ?? 'gmail_send_failed'),\n  (() => {\n    const e = $json.error ?? $json;\n    const code = Number(e.httpCode ?? e.statusCode ?? e.code ?? e.status ?? e.cause?.statusCode ?? e.error?.code ?? 0);\n    const msg = String(e.message ?? e.error?.message ?? e.error ?? '').toLowerCase();\n    if ([400, 401, 403, 404].includes(code)) return false;\n    if (/invalid_grant|unauthorized|forbidden|permission|invalid (credential|token|template|recipient|parameter)/.test(msg)) return false;\n    return true;\n  })()\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        704,
+        240
+      ],
+      "id": "6982d1e8-50cc-414e-a000-c840062197d3",
+      "name": "Fail Notification"
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Recover Stale Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recover Stale Notifications": {
+      "main": [
+        [
+          {
+            "node": "Claim Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Notifications": {
+      "main": [
+        [
+          {
+            "node": "Send Failure Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Failure Alert": {
+      "main": [
+        [
+          {
+            "node": "Complete Notification",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "active": false,
+  "pinData": {}
+}

@@ -1,0 +1,7 @@
+# Preserve licensed and fingerprinted source bytes across Git checkouts.
+workflows/** -text whitespace=cr-at-eol
+migrations/** -text whitespace=cr-at-eol
+compose.yml -text whitespace=cr-at-eol
+concurrent-test.sql -text whitespace=cr-at-eol
+test-order.json -text whitespace=cr-at-eol
+LICENSE -text whitespace=cr-at-eol

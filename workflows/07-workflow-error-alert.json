@@ -1,0 +1,51 @@
+{
+  "name": "07 - Workflow Error Alert",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "e8cd4574-4732-44b2-ab06-5f9de1ae761f",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "sendTo": "qa-recipient@example.invalid",
+        "subject": "=n8n error: {{ $json.workflow.name }} Body: Workflow: {{ $json.workflow.name }}\\nNode: {{ $json.execution.lastNodeExecuted }}\\nError: {{ $json.execution.error.message }}\\nExecution: {{ $json.execution.url }}",
+        "message": "Workflow Error Alert",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "e79a5771-4f0a-4d7f-b4e4-c237c97e66fe",
+      "name": "Send a message"
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "active": false,
+  "pinData": {}
+}

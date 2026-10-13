@@ -1,0 +1,36 @@
+# Secrets and credential stores
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+*credentials-decrypted*
+# Persistent databases, n8n state and local backups
+postgres_data/
+n8n_data/
+data/
+.n8n/
+*.dump
+*.backup
+*.sqlite*
+*.log
+logs/
+backups/
+# Dependencies and machine-only files
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+# Original unsanitized snapshots remain locally preserved
+workflows-export/
+docs/qa-preparation/*.json
+# Public QA summary and approved screenshot remain public; full history is private
+
+# Internal QA history and reconciliation archives: never publish or force-add
+.private/
+scan.txt
+scan.txt
