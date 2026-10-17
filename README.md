@@ -2,6 +2,8 @@
 
 Reliable order intake and recoverable ERP delivery for a smaller Shopify integration. The gateway keeps an order and its delivery job together, prevents repeated webhooks from creating repeated jobs, and records what happened when an external system fails.
 
+**Evidence update — 17 October 2026:** the owner confirms activating and testing the WhatsApp failure-notification workflow after Meta template approval. That completed owner-performed test supplements the earlier direct API/outbox evidence. See [notification evidence follow-up](docs/NOTIFICATION-VERIFICATION.md) for provenance and the separate later activation-state observation.
+
 **Status: ready for portfolio demonstration with documented limitations.** Functional and mock reliability QA passed. One genuine Shopify-to-Odoo draft-quotation scenario and its signed replay passed. This is a verified portfolio project, not a production-certified integration.
 
 ## Business value
@@ -41,7 +43,7 @@ n8n orchestrates; PostgreSQL owns transactional state. The mock ERP is implement
 | Concurrent workers and crash reconciliation | Overlapping workers **692/694/699**; interrupted worker **713**, recovery **716/717** (see detailed report for chronology and mock reference evidence). |
 | Restart persistence | Business-table fingerprints matched; resumed worker **586/587** and replay **590** passed. |
 | Notifications | Gmail success **190/191**, failure **197**, error alert **535**; WhatsApp accepted send **252/272**, retry **277**. Previous successful integration evidence is retained. |
-| Custom WhatsApp template | **PASS: HTTP 200 — accepted** for `order_gateway_failure_alert` / `en`, approved test number ending **2077**, 2026-10-13. Modules 05/06 remained unpublished; phone delivery is **PASS — user confirmed receipt**. |
+| Custom WhatsApp template | **PASS: HTTP 200 — accepted** for `order_gateway_failure_alert` / `en`, approved test recipient, 2026-10-13. Modules 05/06 remained unpublished during that specific direct-API checkpoint; phone delivery is **PASS — user confirmed receipt**. The owner subsequently reports activating and testing the failure-notification workflow after approval. |
 
 The Shopify test had total USD 222 and zero source tax. Odoo applied its existing 15% sales tax. This was an explicitly approved fixture mapping, not proof of general Shopify-to-Odoo tax equivalence.
 
@@ -72,7 +74,7 @@ Follow [Setup](docs/SETUP.md) for complete commands and import order. Compose do
 
 Only `orders/create` is supported. There is no new paid-only filter: the live order was paid as a test fixture. General customer/product synchronization, arbitrary SKU mapping, tax reconciliation, refunds, approvals, shipments, stock adjustments and accounting are outside scope. Odoo testing did not confirm quotations or create invoices/pickings.
 
-Leases protect local state; they do not establish exactly-once external effects. The mock has a unique reference constraint; Odoo lookup-before-create is not an atomic uniqueness guarantee. Broader real Odoo concurrency, unknown-outcome faults and backup/restore remain unverified. Custom WhatsApp template API acceptance and user-confirmed phone delivery passed. This direct API test did not exercise the scheduled Module 06 outbox path or change its queue, code or configuration. Notification permanent-error classification remains a documented risk.
+Leases protect local state; they do not establish exactly-once external effects. The mock has a unique reference constraint; Odoo lookup-before-create is not an atomic uniqueness guarantee. Broader real Odoo concurrency, unknown-outcome faults and backup/restore remain unverified. Custom WhatsApp template API acceptance and user-confirmed phone delivery passed. That specific direct API test did not exercise the scheduled Module 06 outbox path or change its queue, code or configuration. Separately, the owner confirms a later post-approval workflow activation and test; see the notification follow-up. Notification permanent-error classification remains a documented risk.
 
 The Compose n8n image is pinned to 2.42.6, the version used in QA. Clean-volume bootstrap (Compose, database provisioning, migrations 001-013) was verified on 2026-10-13: 8 tables, n8n health 200. Importing the sanitized workflows into a fresh n8n instance was not re-run. Keep credentials, raw customer payloads, logs and volume contents private.
 

@@ -2,6 +2,10 @@
 
 Evidence dates: prior integration QA on 2026-10-12; custom WhatsApp template acceptance on 2026-10-13. Results below describe completed tests, not a production certification. SQL-only checks, actual n8n executions, mock integration and real external integration remain distinct. Full internal execution history is preserved privately and excluded from the public repository.
 
+## Owner follow-up — 17 October 2026
+
+The owner confirms that, after Meta approved the custom WhatsApp template, the failure-notification workflow was activated and tested successfully. This is recorded as owner-performed test and receipt evidence, separately from the 13 October direct API test and earlier outbox executions. A later inactive snapshot is a runtime observation, not evidence that the historical activation/test did not happen. See [notification verification follow-up](NOTIFICATION-VERIFICATION.md). No messages or workflows were triggered by this documentation update.
+
 ## Final verified outcomes
 
 | Capability | Layer and result | Evidence |
@@ -18,8 +22,8 @@ Evidence dates: prior integration QA on 2026-10-12; custom WhatsApp template acc
 | Restart persistence | PASS: eight business-table counts/fingerprints matched across PostgreSQL restart; queued delivery and signed replay resumed | Worker 586/mock587, intake590; graceful restart test, separate from crash scenario |
 | Gmail notification branches | PASS: provider acceptance/completion and controlled failure branch exercised | Executions 190/191/197; actual workflow error alert535 |
 | WhatsApp sending | PASS for previously tested sending/API acceptance and outbox completion/retry; user confirmed those messages worked | Standalone252; outbox272, failure/retry277; prior successful evidence retained |
-| Custom WhatsApp template API acceptance | **PASS: HTTP 200 — accepted** | `order_gateway_failure_alert` / `en`; approved test number ending2077; 2026-10-13; Meta returned a message ID |
-| Custom WhatsApp template phone delivery | **PASS — user confirmed receipt** | On 2026-10-13 the user confirmed receiving this custom-template test message on the approved test number ending2077; evidence source is the user's handset receipt confirmation |
+| Custom WhatsApp template API acceptance | **PASS: HTTP 200 — accepted** | `order_gateway_failure_alert` / `en`; approved test recipient; 2026-10-13; Meta returned a message ID |
+| Custom WhatsApp template phone delivery | **PASS — user confirmed receipt** | On 2026-10-13 the user confirmed receiving this custom-template test message on the approved test recipient; evidence source is the user's handset receipt confirmation |
 
 Controlled503 responses and interruption were intentional fault-injection tests, not unresolved delivery defects. One-off fault harnesses are not included as runnable automation; [Testing](TESTING.md) explains the reproducibility boundary.
 
@@ -43,9 +47,9 @@ The target tax difference was explicitly approved and reflects existing Odoo tax
 
 ## Custom WhatsApp template acceptance — 2026-10-13
 
-Codex sent one clearly labeled synthetic test using the saved Module 06 request-body expression and existing credential. Meta returned HTTP 200, a message ID and `message_status: accepted` for `order_gateway_failure_alert`, language `en`, three body text parameters, to the approved test number ending **2077**. Test reference: `WA-TEST-20261013051716`; time: **10:17:16 Asia/Karachi**.
+Codex sent one clearly labeled synthetic test using the saved Module 06 request-body expression and existing credential. Meta returned HTTP 200, a message ID and `message_status: accepted` for `order_gateway_failure_alert`, language `en`, three body text parameters, to the approved test recipient. Test reference: `WA-TEST-20261013051716`; time: **10:17:16 Asia/Karachi**.
 
-Modules **05 and 06 remained unpublished/inactive**. No queue, code or configuration changes were made by this test. It was a direct Meta API request, not a new n8n workflow execution or outbox claim/completion test. Existing WhatsApp outbox completion/retry evidence remains separate and preserved. A successful custom-template send supersedes the previous approval/acceptance-pending statement. Actual phone delivery is **PASS — user confirmed receipt**: on 2026-10-13 the user explicitly confirmed receiving this custom-template test message. This confirmation supersedes the earlier unconfirmed status. No independent Meta delivery-status webhook receipt was captured; the delivery evidence is the user's confirmation of handset receipt.
+During the specific direct API checkpoint described in this section, Modules **05 and 06 remained unpublished/inactive**. No queue, code or configuration changes were made by this test. It was a direct Meta API request, not a new n8n workflow execution or outbox claim/completion test. Existing WhatsApp outbox completion/retry evidence remains separate and preserved. A successful custom-template send supersedes the previous approval/acceptance-pending statement. Actual phone delivery is **PASS — user confirmed receipt**: on 2026-10-13 the user explicitly confirmed receiving this custom-template test message. This confirmation supersedes the earlier unconfirmed status. No independent Meta delivery-status webhook receipt was captured; the delivery evidence is the user's confirmation of handset receipt.
 
 This documentation update records existing evidence only; no new tests were run.
 
@@ -57,7 +61,7 @@ Module 04's published Fail Notification parameter retains the `=={{` prefix. In 
 
 - Clean-volume bootstrap (Compose, provisioning, migrations 001-013): **PASS** on 2026-10-13 (8 tables, n8n health 200). Fresh-instance workflow import and actual backup restore: **NOT TESTED**.
 - Broader real Odoo fault/unknown-outcome/concurrent-create scenarios: **NOT TESTED**. Mock reliability outcomes do not establish these external guarantees.
-- Custom WhatsApp template API acceptance: **PASS** on 2026-10-13. Actual phone delivery: **PASS — user confirmed receipt** on 2026-10-13. The new direct API result does not establish a new Module 06 scheduled/outbox regression.
+- Custom WhatsApp template API acceptance: **PASS** on 2026-10-13. Actual phone delivery: **PASS — user confirmed receipt** on 2026-10-13. That direct API result does not itself establish a new Module 06 scheduled/outbox regression. The owner subsequently confirms activation and testing after approval; that separate evidence is recorded in the follow-up above.
 - Mixed accept/reject concurrency and some intake infrastructure-error edge cases remain unverified. Intake does not reconcile arbitrary line sums, tax, shipping and discounts.
 - Module 06 currently retries all failed sends; permanent Meta-error classification remains unverified. Odoo lookup-before-create is not atomic external uniqueness.
 
